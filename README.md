@@ -145,6 +145,67 @@ flowchart TD
 | Model & state | `app/Models/Deployment.php`, `app/Models/DeploymentStep.php` |
 | Simulasi test | `app/Support/SimulateOptions.php`, `app/Enums/FlowStep.php` |
 
+### Desain Database
+
+Cuma 2 tabel
+
+```mermaid
+erDiagram
+    deployments ||--o{ deployment_steps : "punya banyak"
+
+    deployments {
+        uuid id PK
+        boolean public_ip
+        json simulate
+        string status
+        tinyint attempt
+        string vpc_id
+        string subnet_id
+        string acl_list_id
+        string vm_id
+        string public_ip_id
+        text failure_reason
+        json rollback_warnings
+        string rollback_phase
+        string rollback_job_id
+        smallint rollback_poll_attempts
+    }
+
+    deployment_steps {
+        bigint id PK
+        uuid deployment_id FK
+        string step
+        string status
+        text message
+        string fake_cs_job_id
+        smallint poll_attempts
+    }
+```
+
+**`deployments`** — 1 baris = 1 deployment (= 1 "user" request):
+
+| Kolom | Kegunaan |
+|---|---|
+| `id` | UUID, sekaligus identitas "user" — tidak ada tabel `users` terpisah |
+| `public_ip` | Apakah perlu alokasi public IP (Static NAT) |
+| `simulate` | Payload `{step, result, delay, timeout}` opsional untuk demo skenario |
+| `status` | `pending` → `processing` → (`rolling_back` → `retrying` →) `success`/`failed` |
+| `attempt` | Percobaan ke berapa, maks `DeploymentPipeline::MAX_ATTEMPTS` (3) |
+| `vpc_id`, `subnet_id`, `acl_list_id`, `vm_id`, `public_ip_id` | Resource id yang sudah berhasil dibuat — sumber kebenaran tunggal untuk progress DAN untuk `RollbackDeploymentJob` tahu apa yang perlu dihapus |
+| `failure_reason` | Pesan error final kalau `status=failed` |
+| `rollback_warnings` | Riwayat langkah rollback yang gagal/timeout tapi tetap dilewati (lihat bagian `GET` di bawah) |
+| `rollback_phase`, `rollback_job_id`, `rollback_poll_attempts` | State polling milik `RollbackDeploymentJob` — harus di database, bukan properti Job, karena `release()` Laravel tidak menyimpan ulang mutasi objek job (cuma re-queue payload asli) |
+
+**`deployment_steps`** — 1 baris per step per deployment (`unique(deployment_id, step)`), diperbarui di tempat lewat `updateOrCreate()`/`firstOrCreate()` — bukan ditambah terus:
+
+| Kolom | Kegunaan |
+|---|---|
+| `deployment_id` | FK ke `deployments.id`, `cascadeOnDelete()` |
+| `step` | Salah satu nilai `App\Enums\FlowStep`, mis. `create_vpc` |
+| `status` | `pending`/`processing`/`success`/`failed` — ini yang dibaca `GET /api/deployments/{id}` buat progress per step |
+| `message` | Pesan error kalau step ini yang gagal |
+| `fake_cs_job_id`, `poll_attempts` | State polling milik `PollsFakeCsJob` — alasan sama seperti `rollback_*` di atas: harus persist di DB karena job bisa `release()` berkali-kali sebelum selesai |
+
 ## Dokumentasi Endpoint
 
 ### `POST /api/deployments`
