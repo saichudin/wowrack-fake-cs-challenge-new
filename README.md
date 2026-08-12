@@ -92,11 +92,33 @@ sempat terbentuk (urutan wajib: VM dulu → subnet → VPC, karena fake-cs
 menolak hapus subnet yang masih ada VM aktif di dalamnya), lalu:
 - kalau penyebabnya **gagal** (`jobstatus=2`) → berhenti, status jadi `failed`.
 - kalau penyebabnya **timeout** → seluruh flow diulang dari awal (maksimal 3x
-  percobaan), baru `failed` kalau tetap gagal di percobaan ke-3. Percobaan
-  ke-2 & ke-3 tidak langsung ditembak — ada *exponential backoff* (~10 detik,
-  lalu ~20 detik) + sedikit jitter acak sebelum retry, supaya kalau
-  penyebabnya fake-cs lagi bermasalah, dia sempat pulih dulu (lihat
-  `DeploymentPipeline::retryDelay()`).
+  percobaan), baru `failed` kalau tetap gagal di percobaan ke-3.
+
+### Backoff sebelum retry
+
+Percobaan ke-2 & ke-3 tidak langsung ditembak begitu rollback kelar — ada
+jeda yang makin lama tiap percobaan (`DeploymentPipeline::retryDelay()`),
+supaya kalau penyebab timeout-nya fake-cs lagi bermasalah, dia sempat pulih
+dulu sebelum ditembak lagi:
+
+| Attempt | Delay | Formula |
+|---|---|---|
+| 1 (percobaan pertama) | 0 detik | tidak ada alasan menunggu |
+| 2 | ~10-15 detik | `10 × 2⁰ + jitter(0-5)` |
+| 3 | ~20-25 detik | `10 × 2¹ + jitter(0-5)` |
+
+Jitter (variasi acak kecil di atas base delay) ditambahkan supaya kalau ada
+beberapa deployment berbeda yang kebetulan timeout di waktu yang berdekatan,
+mereka tidak semua retry bersamaan di detik yang persis sama.
+
+Delay ini diterapkan lewat `Bus::chain($steps)->delay($delay)->dispatch()`
+di `DeploymentPipeline::dispatch()` — **bukan** `$this->release()` seperti
+`PollsFakeCsJob` (karena di titik ini yang di-dispatch adalah rangkaian job
+baru buat percobaan berikutnya, bukan job yang sama menaruh diri sendiri
+balik ke antrian). Tapi keduanya berujung ke mekanisme database yang sama:
+1 baris di tabel `jobs` dengan kolom `available_at` diset ke masa depan —
+tidak ada proses PHP mana pun yang "duduk menunggu", worker tetap bebas
+mengerjakan deployment lain selama masa backoff ini.
 
 ```mermaid
 flowchart TD
