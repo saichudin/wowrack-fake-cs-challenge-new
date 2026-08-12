@@ -38,9 +38,29 @@ class DeploymentPipeline
      *  total") before a timeout makes us give up for good. */
     public const MAX_ATTEMPTS = 3;
 
+    /** Backoff base: attempt 2 waits ~10s, attempt 3 waits ~20s (doubles
+     *  each retry) before hitting fake-cs again — if a timeout was caused
+     *  by fake-cs struggling, retrying instantly just hits the same
+     *  problem again. */
+    private const RETRY_BASE_DELAY_SECONDS = 10;
+
+    /** Random extra on top of the backoff, so deployments that all timed
+     *  out around the same moment don't all retry at the exact same
+     *  instant and pile back onto fake-cs together. */
+    private const RETRY_JITTER_MAX_SECONDS = 5;
+
     public static function dispatch(Deployment $deployment): void
     {
-        $deployment->update(['status' => DeploymentStatus::Processing]);
+        $delay = self::retryDelay($deployment->attempt);
+
+        // A fresh attempt (no delay) is marked "processing" right away.
+        // A retry keeps whatever status the caller already set
+        // (RollbackDeploymentJob::finish() sets "retrying") for the
+        // whole backoff wait + this attempt, instead of jumping to
+        // "processing" before any work has actually started.
+        if ($delay === 0) {
+            $deployment->update(['status' => DeploymentStatus::Processing]);
+        }
 
         $steps = [
             new CreateVpcJob($deployment->id),
@@ -78,8 +98,21 @@ class DeploymentPipeline
         $steps[] = new MarkDeploymentSuccessJob($deployment->id);
 
         Bus::chain($steps)
+            ->delay($delay)
             ->catch(fn (Throwable $e) => self::handleFailure($deployment->id, $e))
             ->dispatch();
+    }
+
+    /** 0 for the first attempt (no reason to wait), exponential backoff + jitter after that. */
+    private static function retryDelay(int $attempt): int
+    {
+        if ($attempt <= 1) {
+            return 0;
+        }
+
+        $backoff = self::RETRY_BASE_DELAY_SECONDS * (2 ** ($attempt - 2));
+
+        return $backoff + random_int(0, self::RETRY_JITTER_MAX_SECONDS);
     }
 
     private static function handleFailure(string $deploymentId, Throwable $e): void

@@ -22,6 +22,11 @@ class DeploymentController extends Controller
             'public_ip' => $request->boolean('public_ip'),
             'simulate' => $request->input('simulate'),
             'status' => DeploymentStatus::Pending,
+            // Explicit, not just relying on the DB column's default(1) —
+            // the in-memory model right after create() doesn't know about
+            // DB-level defaults it didn't set itself, so DeploymentPipeline
+            // reading $deployment->attempt here would otherwise see null.
+            'attempt' => 1,
         ]);
 
         DeploymentPipeline::dispatch($deployment);

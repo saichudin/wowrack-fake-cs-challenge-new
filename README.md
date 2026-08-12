@@ -92,7 +92,11 @@ sempat terbentuk (urutan wajib: VM dulu → subnet → VPC, karena fake-cs
 menolak hapus subnet yang masih ada VM aktif di dalamnya), lalu:
 - kalau penyebabnya **gagal** (`jobstatus=2`) → berhenti, status jadi `failed`.
 - kalau penyebabnya **timeout** → seluruh flow diulang dari awal (maksimal 3x
-  percobaan), baru `failed` kalau tetap gagal di percobaan ke-3.
+  percobaan), baru `failed` kalau tetap gagal di percobaan ke-3. Percobaan
+  ke-2 & ke-3 tidak langsung ditembak — ada *exponential backoff* (~10 detik,
+  lalu ~20 detik) + sedikit jitter acak sebelum retry, supaya kalau
+  penyebabnya fake-cs lagi bermasalah, dia sempat pulih dulu (lihat
+  `DeploymentPipeline::retryDelay()`).
 
 ```mermaid
 flowchart TD
