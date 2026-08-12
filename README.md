@@ -94,6 +94,41 @@ menolak hapus subnet yang masih ada VM aktif di dalamnya), lalu:
 - kalau penyebabnya **timeout** → seluruh flow diulang dari awal (maksimal 3x
   percobaan), baru `failed` kalau tetap gagal di percobaan ke-3.
 
+### Bagaimana rollback bekerja
+
+`RollbackDeploymentJob` sengaja dibuat sebagai **1 job yang jalan lewat 3
+fase** (`destroy_vm` → `delete_network` → `delete_vpc`), bukan
+`Bus::chain([DestroyVmJob, DeleteNetworkJob, DeleteVpcJob])` seperti flow
+maju — karena `Bus::chain()` berhenti total di link pertama yang gagal,
+padahal rollback butuh sifat **best-effort**: tetap coba fase berikutnya
+walau fase sebelumnya gagal/timeout, supaya proses ini dijamin selalu
+selesai (tidak pernah nyangkut permanen di status `rolling_back`).
+
+Ini aman dilakukan karena beda sifatnya dengan flow maju: tiap fase
+rollback **tidak butuh data dari fase sebelumnya** —
+`vm_id`/`subnet_id`/`vpc_id` semuanya sudah tercatat sejak resource itu
+dibuat, bukan hasil dari langkah rollback sebelumnya. Urutannya (`VM →
+subnet → VPC`) wajib karena aturan bisnis fake-cs (menolak hapus subnet
+yang masih ada VM aktif, terbukti lewat testing manual), bukan karena
+butuh output langkah sebelumnya — jadi kalau 1 fase gagal, mencoba fase
+berikutnya tetap *mungkin* secara teknis, cuma murah buat dicoba (bukan
+dijamin gagal karena kekurangan data).
+
+Tiap fase-nya sendiri juga non-blocking, pola yang sama dengan
+`PollsFakeCsJob`: `trigger()` command hapusnya sekali, simpan `jobid` ke
+kolom `deployments.rollback_job_id`, lalu `release()` balik ke antrian dan
+dicek lagi beberapa detik kemudian (`checkJob()`) — bukan `sleep()` di 1
+eksekusi panjang. Kolom `rollback_phase` / `rollback_job_id` /
+`rollback_poll_attempts` wajib disimpan di database (bukan properti job)
+dengan alasan yang sama seperti `deployment_steps.fake_cs_job_id`:
+`release()` cuma menaruh balik payload asli job apa adanya, tidak
+menyimpan ulang state yang berubah selama eksekusi (lihat bagian "Desain
+Database" di bawah).
+
+Kalau 1 fase gagal/timeout, itu dicatat ke `rollback_warnings` (dan proses
+tetap lanjut ke fase berikutnya, bukan berhenti) — lihat dokumentasi
+`GET /api/deployments/{id}` untuk detail formatnya.
+
 ### Backoff sebelum retry
 
 Percobaan ke-2 & ke-3 tidak langsung ditembak begitu rollback kelar — ada
