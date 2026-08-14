@@ -297,7 +297,7 @@ selesai; progress dicek lewat endpoint `GET` di bawah.
 | `simulate.result` | tidak | `1` (paksa sukses) atau `2` (paksa `jobstatus=2` → demo "Failed Job") |
 | `simulate.delay` | tidak | Detik — job tetap `jobstatus=0` selama ini sebelum selesai |
 | `simulate.timeout` | tidak | Detik — fake-cs sengaja tidak merespons selama ini (demo "Timeout"); pakai nilai > 30 supaya curl beneran timeout |
-| `simulate.only_attempt` | tidak | Batasi simulasi di atas cuma berlaku di 1 nomor attempt tertentu (1-3). Tanpa ini, `simulate` yang sama diterapkan ulang di **setiap** percobaan retry — jadi kalau tidak dibatasi, step yang di-set `timeout` akan timeout terus sampai attempt ke-3 lalu `failed`. Set `"only_attempt": 1` untuk demo "timeout sekali, retry berikutnya sukses" |
+| `simulate.only_attempt` | tidak | Integer, tervalidasi `1` s.d. `DeploymentPipeline::MAX_ATTEMPTS` (sekarang `3`, ikut otomatis kalau konstanta itu diubah) — kirim di luar rentang ini balas `422 Unprocessable Entity`. Batasi simulasi di atas cuma berlaku di 1 nomor attempt tertentu. Tanpa ini, `simulate` yang sama diterapkan ulang di **setiap** percobaan retry — jadi kalau tidak dibatasi, step yang di-set `timeout` akan timeout terus sampai attempt ke-3 lalu `failed`. Set `"only_attempt": 1` untuk demo "timeout sekali, retry berikutnya sukses" |
 
 **Response `202 Accepted`:**
 
