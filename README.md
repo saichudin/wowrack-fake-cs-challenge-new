@@ -21,11 +21,11 @@ paralelisme dikerjakan pakai `Illuminate\Support\Facades\Http` dan
 
 ## Setup
 
-Project di-zip **tanpa folder `vendor/`**, jadi perlu `composer install` dulu.
+Clone project dari repo git.
 
 ```bash
 composer install
-cp .env.example .env      # Windows: copy .env.example .env
+cp .env.example .env
 php artisan key:generate
 ```
 
@@ -249,7 +249,7 @@ erDiagram
 |---|---|
 | `id` | UUID, sekaligus identitas "user" — tidak ada tabel `users` terpisah |
 | `public_ip` | Apakah perlu alokasi public IP (Static NAT) |
-| `simulate` | Payload `{step, result, delay, timeout}` opsional untuk demo skenario |
+| `simulate` | Payload `{step, result, delay, timeout, only_attempt}` opsional untuk demo skenario |
 | `status` | `pending` → `processing` → (`rolling_back` → `retrying` →) `success`/`failed` |
 | `attempt` | Percobaan ke berapa, maks `DeploymentPipeline::MAX_ATTEMPTS` (3) |
 | `vpc_id`, `subnet_id`, `acl_list_id`, `vm_id`, `public_ip_id` | Resource id yang sudah berhasil dibuat — sumber kebenaran tunggal untuk progress DAN untuk `RollbackDeploymentJob` tahu apa yang perlu dihapus |
@@ -297,6 +297,7 @@ selesai; progress dicek lewat endpoint `GET` di bawah.
 | `simulate.result` | tidak | `1` (paksa sukses) atau `2` (paksa `jobstatus=2` → demo "Failed Job") |
 | `simulate.delay` | tidak | Detik — job tetap `jobstatus=0` selama ini sebelum selesai |
 | `simulate.timeout` | tidak | Detik — fake-cs sengaja tidak merespons selama ini (demo "Timeout"); pakai nilai > 30 supaya curl beneran timeout |
+| `simulate.only_attempt` | tidak | Batasi simulasi di atas cuma berlaku di 1 nomor attempt tertentu (1-3). Tanpa ini, `simulate` yang sama diterapkan ulang di **setiap** percobaan retry — jadi kalau tidak dibatasi, step yang di-set `timeout` akan timeout terus sampai attempt ke-3 lalu `failed`. Set `"only_attempt": 1` untuk demo "timeout sekali, retry berikutnya sukses" |
 
 **Response `202 Accepted`:**
 
@@ -385,6 +386,15 @@ curl -X POST http://127.0.0.1:8000/api/deployments \
 curl -X POST http://127.0.0.1:8000/api/deployments \
   -H "Content-Type: application/json" \
   -d '{"public_ip": false, "simulate": {"step": "attach_acl", "timeout": 35}}'
+```
+
+**5. Demo Timeout sekali, lalu retry berikutnya sukses** (`only_attempt: 1` —
+timeout cuma kejadian di percobaan pertama, percobaan ke-2 jalan normal
+sampai `status: success`):
+```bash
+curl -X POST http://127.0.0.1:8000/api/deployments \
+  -H "Content-Type: application/json" \
+  -d '{"public_ip": false, "simulate": {"step": "attach_acl", "timeout": 35, "only_attempt": 1}}'
 ```
 
 Lalu cek hasilnya:
