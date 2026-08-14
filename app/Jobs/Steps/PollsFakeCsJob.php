@@ -89,7 +89,7 @@ abstract class PollsFakeCsJob implements ShouldQueue
 
             $body = $client->trigger($this->command(), array_merge(
                 $this->params($deployment),
-                $this->simulate()->paramsFor($this->step()),
+                $this->simulate()->paramsFor($this->step(), $deployment->attempt),
             ));
 
             $stepRow->update(['fake_cs_job_id' => $body['jobid'], 'poll_attempts' => 0]);
@@ -118,7 +118,12 @@ abstract class PollsFakeCsJob implements ShouldQueue
         }
 
         $this->onSuccess($deployment, $check->result);
-        $stepRow->update(['status' => StepStatus::Success, 'fake_cs_job_id' => null]);
+
+        // Clear `message` too, not just flip the status — otherwise a step
+        // that failed on an earlier attempt (e.g. via `only_attempt`) but
+        // then succeeds on a retry would keep showing its old failure
+        // message even though it's now `success`.
+        $stepRow->update(['status' => StepStatus::Success, 'fake_cs_job_id' => null, 'message' => null]);
     }
 
     /**

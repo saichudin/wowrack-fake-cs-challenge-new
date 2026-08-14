@@ -21,7 +21,7 @@ class ListPublicIpJob extends SyncStepJob
 
     protected function run(Deployment $deployment, FakeCsClient $client): void
     {
-        $body = $client->trigger('listPublicIpAddresses', $this->simulate()->paramsFor($this->step()));
+        $body = $client->trigger('listPublicIpAddresses', $this->simulate()->paramsFor($this->step(), $deployment->attempt));
 
         // Only ids in "Free" state can be attached to a VM.
         $free = collect($body['publicipaddress'] ?? [])->firstWhere('state', 'Free');

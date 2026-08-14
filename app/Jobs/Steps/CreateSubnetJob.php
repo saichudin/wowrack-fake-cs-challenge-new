@@ -24,7 +24,7 @@ class CreateSubnetJob extends SyncStepJob
             'name' => "subnet-{$deployment->id}",
             'gateway' => '10.0.1.1',
             'netmask' => '255.255.255.0',
-        ], $this->simulate()->paramsFor($this->step())));
+        ], $this->simulate()->paramsFor($this->step(), $deployment->attempt)));
 
         $deployment->update(['subnet_id' => $body['network']['id']]);
     }

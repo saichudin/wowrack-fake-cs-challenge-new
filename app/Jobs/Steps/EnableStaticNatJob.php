@@ -23,6 +23,6 @@ class EnableStaticNatJob extends SyncStepJob
             'virtualmachineid' => $deployment->vm_id,
             'ipaddressid' => $deployment->public_ip_id,
             'networkid' => $deployment->subnet_id,
-        ], $this->simulate()->paramsFor($this->step())));
+        ], $this->simulate()->paramsFor($this->step(), $deployment->attempt)));
     }
 }

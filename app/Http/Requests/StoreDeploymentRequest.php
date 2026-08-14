@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Enums\FlowStep;
+use App\Services\Deployment\DeploymentPipeline;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -27,6 +28,11 @@ class StoreDeploymentRequest extends FormRequest
             'simulate.result' => ['nullable', 'integer', Rule::in([1, 2])],
             'simulate.delay' => ['nullable', 'integer', 'min:1', 'max:120'],
             'simulate.timeout' => ['nullable', 'integer', 'min:1', 'max:120'],
+
+            // Optional: restrict the simulation above to only one specific
+            // attempt (e.g. 1) instead of it re-triggering on every retry —
+            // needed to demo "times out once, then the retry succeeds".
+            'simulate.only_attempt' => ['nullable', 'integer', 'min:1', 'max:'.DeploymentPipeline::MAX_ATTEMPTS],
         ];
     }
 }
