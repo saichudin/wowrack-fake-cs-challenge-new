@@ -63,6 +63,10 @@ return [
             'path' => storage_path('logs/laravel.log'),
             'level' => env('LOG_LEVEL', 'debug'),
             'replace_placeholders' => true,
+            // Beberapa `queue:work` proses menulis ke file yang sama secara
+            // bersamaan (lihat README "Menjalankan aplikasi") — tanpa ini,
+            // tulisan dari 1 proses bisa hilang ketiban proses lain.
+            'locking' => true,
         ],
 
         'daily' => [
