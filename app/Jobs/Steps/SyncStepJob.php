@@ -4,11 +4,13 @@ namespace App\Jobs\Steps;
 
 use App\Enums\FlowStep;
 use App\Enums\StepStatus;
+use App\Exceptions\FakeCs\FakeCsCallTimedOutException;
 use App\Models\Deployment;
 use App\Services\FakeCs\FakeCsClient;
 use Illuminate\Bus\Batchable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
@@ -45,6 +47,13 @@ abstract class SyncStepJob implements ShouldQueue
     public function failed(Throwable $e): void
     {
         $deployment = Deployment::find($this->deploymentId);
+
+        Log::warning(($e instanceof FakeCsCallTimedOutException ? 'Step timed out' : 'Step failed').": {$this->step()->value}", [
+            'deployment_id' => $this->deploymentId,
+            'step' => $this->step()->value,
+            'attempt' => $deployment?->attempt,
+            'error' => $e->getMessage(),
+        ]);
 
         if ($deployment) {
             $this->markStep($deployment, $this->step(), StepStatus::Failed, $e->getMessage());
