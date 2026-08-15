@@ -3,9 +3,19 @@
 Service yang mensimulasikan proses "deploy VM ke cloud" (create VPC → subnet →
 ACL → deploy VM → allocate public IP) dengan memanggil mock API **fake-cs**,
 lengkap dengan penanganan proses paralel, retry, dan rollback otomatis kalau
-ada langkah yang gagal atau timeout. Detail requirement ada di [requirement.md](requirement.md).
+ada langkah yang gagal atau timeout.
 
-## Versi
+## Daftar Isi
+
+- [Tech Stack](#tech-stack)
+- [Menjalankan Project](#menjalankan-project)
+- [Arsitektur](#arsitektur)
+- [Retry & Rollback](#retry--rollback)
+- [Struktur Kode](#struktur-kode)
+- [Desain Database](#desain-database)
+- [Dokumentasi API](#dokumentasi-api)
+
+## Tech Stack
 
 | | Versi |
 |---|---|
@@ -19,9 +29,9 @@ Tidak ada library pihak ketiga di luar bawaan Laravel (`laravel/framework`,
 paralelisme dikerjakan pakai `Illuminate\Support\Facades\Http` dan
 `Illuminate\Support\Facades\Bus` bawaan framework.
 
-## Setup
+## Menjalankan Project
 
-Clone project dari repo git.
+### 1. Install dependency
 
 ```bash
 composer install
@@ -29,7 +39,7 @@ cp .env.example .env
 php artisan key:generate
 ```
 
-### Database
+### 2. Setup database
 
 Pakai **MySQL**, ubah bagian ini di `.env` sebelum migrate:
 
@@ -45,7 +55,7 @@ DB_PASSWORD=
 lalu buat database-nya (`CREATE DATABASE challenge_new;`) dan jalankan
 `php artisan migrate`.
 
-### Fake-CS
+### 3. Konfigurasi Fake-CS
 
 Base URL API mock sudah di-set default di `.env.example`:
 
@@ -53,7 +63,7 @@ Base URL API mock sudah di-set default di `.env.example`:
 FAKE_CS_BASE_URL=https://fake-cs.virmata.com/api/api
 ```
 
-### Menjalankan aplikasi
+### 4. Jalankan aplikasi
 
 Butuh **dua proses** jalan bersamaan — web server (terima request) dan queue
 worker (yang benar-benar mengeksekusi flow deploy-nya):
@@ -71,7 +81,7 @@ php artisan queue:work --queue=default --sleep=1      # terminal 2
 Cek `php artisan route:list --path=deployments` untuk memastikan endpoint
 sudah terdaftar.
 
-## Arsitektur & Alur
+## Arsitektur
 
 Pattern yang dipakai: **Saga (orchestration-based)** — setiap langkah (`create
 VPC`, `deploy VM`, dst) adalah 1 Job Laravel kecil (`app/Jobs/Steps/*`),
@@ -79,81 +89,6 @@ disusun jadi satu alur oleh `App\Services\Deployment\DeploymentPipeline`
 memakai `Bus::chain()` (berurutan) dan `Bus::batch()` (paralel) — bentuknya
 persis mengikuti dependency antar-step: dua step baru paralel kalau
 sama-sama cuma butuh output dari step yang sama sebelumnya.
-
-Job async (yang di command matrix fake-cs tandanya `Async = YES`, cuma
-membari response `jobid`) tidak pernah `sleep()` menunggu — mereka `release()` diri
-sendiri kembali ke antrian dan dicek lagi beberapa detik kemudian
-(`App\Jobs\Steps\PollsFakeCsJob`), supaya worker bebas mengerjakan deployment
-lain sambil menunggu.
-
-Kalau ada step yang gagal (`jobstatus = 2`) atau timeout (curl tidak dapat
-respons), `App\Jobs\RollbackDeploymentJob` jalan: hapus resource yang sudah
-sempat terbentuk (urutan wajib: VM dulu → subnet → VPC, karena fake-cs
-menolak hapus subnet yang masih ada VM aktif di dalamnya), lalu:
-- kalau penyebabnya **gagal** (`jobstatus=2`) → berhenti, status jadi `failed`.
-- kalau penyebabnya **timeout** → seluruh flow diulang dari awal (maksimal 3x
-  percobaan), baru `failed` kalau tetap gagal di percobaan ke-3.
-
-### Bagaimana rollback bekerja
-
-`RollbackDeploymentJob` sengaja dibuat sebagai **1 job yang jalan lewat 3
-fase** (`destroy_vm` → `delete_network` → `delete_vpc`), bukan
-`Bus::chain([DestroyVmJob, DeleteNetworkJob, DeleteVpcJob])` seperti flow
-maju — karena `Bus::chain()` berhenti total di link pertama yang gagal,
-padahal rollback butuh sifat **best-effort**: tetap coba fase berikutnya
-walau fase sebelumnya gagal/timeout, supaya proses ini dijamin selalu
-selesai (tidak pernah nyangkut permanen di status `rolling_back`).
-
-Ini aman dilakukan karena beda sifatnya dengan flow maju: tiap fase
-rollback **tidak butuh data dari fase sebelumnya** —
-`vm_id`/`subnet_id`/`vpc_id` semuanya sudah tercatat sejak resource itu
-dibuat, bukan hasil dari langkah rollback sebelumnya. Urutannya (`VM →
-subnet → VPC`) wajib karena aturan bisnis fake-cs (menolak hapus subnet
-yang masih ada VM aktif, terbukti lewat testing manual), bukan karena
-butuh output langkah sebelumnya — jadi kalau 1 fase gagal, mencoba fase
-berikutnya tetap *mungkin* secara teknis, cuma murah buat dicoba (bukan
-dijamin gagal karena kekurangan data).
-
-Tiap fase-nya sendiri juga non-blocking, pola yang sama dengan
-`PollsFakeCsJob`: `trigger()` command hapusnya sekali, simpan `jobid` ke
-kolom `deployments.rollback_job_id`, lalu `release()` balik ke antrian dan
-dicek lagi beberapa detik kemudian (`checkJob()`) — bukan `sleep()` di 1
-eksekusi panjang. Kolom `rollback_phase` / `rollback_job_id` /
-`rollback_poll_attempts` wajib disimpan di database (bukan properti job)
-dengan alasan yang sama seperti `deployment_steps.fake_cs_job_id`:
-`release()` cuma menaruh balik payload asli job apa adanya, tidak
-menyimpan ulang state yang berubah selama eksekusi (lihat bagian "Desain
-Database" di bawah).
-
-Kalau 1 fase gagal/timeout, itu dicatat ke `rollback_warnings` (dan proses
-tetap lanjut ke fase berikutnya, bukan berhenti) — lihat dokumentasi
-`GET /api/deployments/{id}` untuk detail formatnya.
-
-### Backoff sebelum retry
-
-Percobaan ke-2 & ke-3 tidak langsung ditembak begitu rollback kelar — ada
-jeda yang makin lama tiap percobaan (`DeploymentPipeline::retryDelay()`),
-supaya kalau penyebab timeout-nya fake-cs lagi bermasalah, dia sempat pulih
-dulu sebelum ditembak lagi:
-
-| Attempt | Delay | Formula |
-|---|---|---|
-| 1 (percobaan pertama) | 0 detik | tidak ada alasan menunggu |
-| 2 | ~10-15 detik | `10 × 2⁰ + jitter(0-5)` |
-| 3 | ~20-25 detik | `10 × 2¹ + jitter(0-5)` |
-
-Jitter (variasi acak kecil di atas base delay) ditambahkan supaya kalau ada
-beberapa deployment berbeda yang kebetulan timeout di waktu yang berdekatan,
-mereka tidak semua retry bersamaan di detik yang persis sama.
-
-Delay ini diterapkan lewat `Bus::chain($steps)->delay($delay)->dispatch()`
-di `DeploymentPipeline::dispatch()` — **bukan** `$this->release()` seperti
-`PollsFakeCsJob` (karena di titik ini yang di-dispatch adalah rangkaian job
-baru buat percobaan berikutnya, bukan job yang sama menaruh diri sendiri
-balik ke antrian). Tapi keduanya berujung ke mekanisme database yang sama:
-1 baris di tabel `jobs` dengan kolom `available_at` diset ke masa depan —
-tidak ada proses PHP mana pun yang "duduk menunggu", worker tetap bebas
-mengerjakan deployment lain selama masa backoff ini.
 
 ```mermaid
 flowchart TD
@@ -194,7 +129,128 @@ flowchart TD
     Decide -- "jobstatus=2, ATAU timeout tapi attempt = 3" --> Failed(["status: failed"])
 ```
 
-### Struktur kode
+### Job asinkron tanpa blocking
+
+Job async (yang di command matrix fake-cs tandanya `Async = YES`, cuma
+memberi response `jobid`) tidak pernah `sleep()` menunggu — mereka `release()`
+diri sendiri kembali ke antrian dan dicek lagi beberapa detik kemudian
+(`App\Jobs\Steps\PollsFakeCsJob`), supaya worker bebas mengerjakan deployment
+lain sambil menunggu.
+
+## Retry & Rollback
+
+Kalau ada step yang gagal (`jobstatus = 2`) atau timeout (curl tidak dapat
+respons), `App\Jobs\RollbackDeploymentJob` jalan: hapus resource yang sudah
+sempat terbentuk (urutan wajib: VM dulu → subnet → VPC, karena fake-cs
+menolak hapus subnet yang masih ada VM aktif di dalamnya), lalu:
+- kalau penyebabnya **gagal** (`jobstatus=2`) → berhenti, status jadi `failed`.
+- kalau penyebabnya **timeout** → seluruh flow diulang dari awal (maksimal 3x
+  percobaan), baru `failed` kalau tetap gagal di percobaan ke-3.
+
+### Bagaimana rollback bekerja
+
+`RollbackDeploymentJob` sengaja dibuat sebagai **1 job yang jalan lewat 3
+fase** (`destroy_vm` → `delete_network` → `delete_vpc`), bukan
+`Bus::chain([DestroyVmJob, DeleteNetworkJob, DeleteVpcJob])` seperti flow
+maju — karena `Bus::chain()` berhenti total di link pertama yang gagal,
+padahal rollback butuh sifat **best-effort**: tetap coba fase berikutnya
+walau fase sebelumnya gagal/timeout, supaya proses ini dijamin selalu
+selesai (tidak pernah nyangkut permanen di status `rolling_back`).
+
+Ini aman dilakukan karena beda sifatnya dengan flow maju: tiap fase
+rollback **tidak butuh data dari fase sebelumnya** —
+`vm_id`/`subnet_id`/`vpc_id` semuanya sudah tercatat sejak resource itu
+dibuat, bukan hasil dari langkah rollback sebelumnya. Urutannya (`VM →
+subnet → VPC`) wajib karena aturan bisnis fake-cs (menolak hapus subnet
+yang masih ada VM aktif, terbukti lewat testing manual), bukan karena
+butuh output langkah sebelumnya — jadi kalau 1 fase gagal, mencoba fase
+berikutnya tetap *mungkin* secara teknis, cuma murah buat dicoba (bukan
+dijamin gagal karena kekurangan data).
+
+Tiap fase-nya sendiri juga non-blocking, pola yang sama dengan
+`PollsFakeCsJob`: `trigger()` command hapusnya sekali, simpan `jobid` ke
+kolom `deployments.rollback_job_id`, lalu `release()` balik ke antrian dan
+dicek lagi beberapa detik kemudian (`checkJob()`) — bukan `sleep()` di 1
+eksekusi panjang. Kolom `rollback_phase` / `rollback_job_id` /
+`rollback_poll_attempts` wajib disimpan di database (bukan properti job)
+dengan alasan yang sama seperti `deployment_steps.fake_cs_job_id`:
+`release()` cuma menaruh balik payload asli job apa adanya, tidak
+menyimpan ulang state yang berubah selama eksekusi (lihat bagian
+[Desain Database](#desain-database) di bawah).
+
+Kalau 1 fase gagal/timeout, itu dicatat ke `rollback_warnings` (dan proses
+tetap lanjut ke fase berikutnya, bukan berhenti) — lihat dokumentasi
+`GET /api/deployments/{id}` untuk detail formatnya.
+
+### Kenapa retry dari awal, bukan hanya step yang timeout
+
+Alasannya masuk akal secara teknis adalah:
+
+1. **Timeout itu ambigu.** Timeout curl cuma berarti kita tidak dapat
+   respons — bukan bukti request-nya gagal diproses. Bisa jadi request
+   belum sampai ke fake-cs, sedang diproses, atau justru **sudah sukses**
+   dan cuma responsnya yang hilang. Requirement (baris 25) sengaja
+   menyederhanakan ini: "anggap fake-cs tidak memproses apa-apa karena
+   timeout" — tapi asumsi itu cuma aman kalau kita rollback dulu sebelum
+   mencoba lagi. Kalau langsung retry step yang sama tanpa rollback dan
+   asumsi itu ternyata salah, command seperti `createVpc`/`createNetworkACLList`
+   bisa terpanggil dua kali untuk resource yang sama (nama resource-nya
+   deterministik per deployment, misal `vpc-{id}`) — berisiko bikin
+   resource duplikat/orphan di fake-cs, karena command matrix tidak
+   menjamin command-command ini idempoten.
+2. **Step-step di flow ini saling bergantung.** `create_subnet` butuh
+   `vpc_id`, `attach_acl` butuh `subnet_id` + `acl_list_id`, `deploy_vm` &
+   `enable_static_nat` butuh hasil step sebelumnya juga. Rollback dulu
+   menjamin retry selalu mulai dari state yang benar-benar bersih (tidak
+   ada resource sama sekali), dibanding harus melacak persis step mana
+   yang statusnya ambigu dan mana yang aman dilanjutkan.
+3. **Lebih sederhana untuk diimplementasikan dengan benar.**
+   `DeploymentPipeline::dispatch()` selalu membangun ulang `Bus::chain`
+   lengkap dari `CreateVpcJob` lagi — tidak ada jalur "resume dari step
+   tertentu". Flow-nya bukan chain linear murni (ada `Bus::batch()`
+   paralel di tengah, plus `CreateAclRuleJob` yang di-`add()` dinamis ke
+   batch-nya `CreateAclListJob`), jadi "retry cuma 1 step di tengah batch
+   paralel" jauh lebih rawan bug (butuh `allowFailures()` di tiap batch,
+   retry counter per-step, dst) dibanding "hapus semua, mulai bersih
+   lagi".
+
+Trade-off-nya: rollback-lalu-retry-dari-awal kadang menghapus resource yang
+sebenarnya tidak perlu dihapus (kalau ternyata timeout-nya cuma respons yang
+lambat, bukan gagal beneran), dan menambah waktu total penyelesaian
+dibanding retry-in-place. Tapi itu ditukar dengan jaminan konsistensi —
+tidak pernah menebak-nebak state fake-cs — dan implementasi yang jauh lebih
+sederhana untuk flow dengan langkah paralel dan saling bergantung seperti
+ini. Untuk kasus **Failed Job** (`jobstatus=2`) situasinya beda: fake-cs
+sudah eksplisit bilang gagal, tidak ada ambiguitas, makanya langsung
+berhenti (`status: failed`) tanpa diulang.
+
+### Backoff sebelum retry
+
+Percobaan ke-2 & ke-3 tidak langsung ditembak begitu rollback kelar — ada
+jeda yang makin lama tiap percobaan (`DeploymentPipeline::retryDelay()`),
+supaya kalau penyebab timeout-nya fake-cs lagi bermasalah, dia sempat pulih
+dulu sebelum ditembak lagi:
+
+| Attempt | Delay | Formula |
+|---|---|---|
+| 1 (percobaan pertama) | 0 detik | tidak ada alasan menunggu |
+| 2 | ~10-15 detik | `10 × 2⁰ + jitter(0-5)` |
+| 3 | ~20-25 detik | `10 × 2¹ + jitter(0-5)` |
+
+Jitter (variasi acak kecil di atas base delay) ditambahkan supaya kalau ada
+beberapa deployment berbeda yang kebetulan timeout di waktu yang berdekatan,
+mereka tidak semua retry bersamaan di detik yang persis sama.
+
+Delay ini diterapkan lewat `Bus::chain($steps)->delay($delay)->dispatch()`
+di `DeploymentPipeline::dispatch()` — **bukan** `$this->release()` seperti
+`PollsFakeCsJob` (karena di titik ini yang di-dispatch adalah rangkaian job
+baru buat percobaan berikutnya, bukan job yang sama menaruh diri sendiri
+balik ke antrian). Tapi keduanya berujung ke mekanisme database yang sama:
+1 baris di tabel `jobs` dengan kolom `available_at` diset ke masa depan —
+tidak ada proses PHP mana pun yang "duduk menunggu", worker tetap bebas
+mengerjakan deployment lain selama masa backoff ini.
+
+## Struktur Kode
 
 | Lapisan | File |
 |---|---|
@@ -206,9 +262,9 @@ flowchart TD
 | Model & state | `app/Models/Deployment.php`, `app/Models/DeploymentStep.php` |
 | Simulasi test | `app/Support/SimulateOptions.php`, `app/Enums/FlowStep.php` |
 
-### Desain Database
+## Desain Database
 
-Cuma 2 tabel
+Cuma 2 tabel:
 
 ```mermaid
 erDiagram
@@ -267,7 +323,7 @@ erDiagram
 | `message` | Pesan error kalau step ini yang gagal |
 | `fake_cs_job_id`, `poll_attempts` | State polling milik `PollsFakeCsJob` — alasan sama seperti `rollback_*` di atas: harus persist di DB karena job bisa `release()` berkali-kali sebelum selesai |
 
-## Dokumentasi Endpoint
+## Dokumentasi API
 
 ### `POST /api/deployments`
 
